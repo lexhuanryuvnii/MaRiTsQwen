@@ -2,14 +2,11 @@
 
 Агент для сбора метрик CPU и отправки их в `metrics_client_api`.
 
-## Что умеет
+## Назначение
 
-- Собирать CPU-метрики на хосте.
-- Отправлять метрики в API по HTTP.
-- Работать:
-  - в Docker;
-  - как локальная Python-утилита на Linux;
-  - как локальная Python-утилита на Windows.
+- Сбор системных метрик (CPU, память, диск) на хосте
+- Отправка метрик в API по HTTP
+- Работа в фоновом режиме с настраиваемым интервалом
 
 ## Структура проекта
 
@@ -17,259 +14,409 @@
 cpu_monitor/
 ├── Dockerfile
 ├── pyproject.toml
+├── README.md
 ├── install_agent.bat
 ├── run_agent.bat
 ├── install_and_run_agent.bat
 ├── install_and_run.sh
-└── src
-    └── cpu_monitor
-        ├── collector.py
-        ├── compressor.py
+└── src/
+    └── cpu_monitor/
         ├── __init__.py
         ├── main.py
+        ├── collector.py
+        ├── compressor.py
         └── sender.py
 ```
 
 ## Зависимости
 
-- Python 3.14+
-- `psutil`
-- `requests`
+- Python 3.11+
+- psutil>=5.0
+- requests>=2.0
 
 ## Конфигурация
 
 Агент настраивается через переменные окружения:
 
-- `METRICS_API_URL` — адрес FastAPI-клиента.
-- `CPU_SCRAPE_INTERVAL` — интервал между циклами сбора, в секундах.
-- `CPU_COMPRESSOR` — имя алгоритма сжатия, например `none`.
-
-Пример:
-
-```bash
-METRICS_API_URL=http://localhost:8000
-CPU_SCRAPE_INTERVAL=5
-CPU_COMPRESSOR=none
-```
+| Переменная | Описание | Пример | По умолчанию |
+|------------|----------|--------|--------------|
+| `METRICS_API_URL` | Адрес FastAPI-клиента | `http://localhost:8000` | `http://localhost:8000` |
+| `CPU_SCRAPE_INTERVAL` | Интервал сбора метрик (сек) | `5` | `5` |
+| `CPU_COMPRESSOR` | Алгоритм сжатия | `none` | `none` |
+| `LOG_LEVEL` | Уровень логирования | `INFO` | `INFO` |
 
 ---
 
-# Запуск в Docker Compose
+## Запуск в Docker Compose
 
-Если весь проект поднимается через compose, агент работает как отдельный сервис и отправляет метрики в `metrics_client_api`.
+### Production режим
 
-## Пример сервиса в `docker-compose.yml`
+Агент запускается как часть общего compose-файла:
+
+```bash
+docker compose up -d cpu_monitor
+```
+
+Конфигурация в `docker-compose.yml`:
 
 ```yaml
-  # 4. Агент мониторинга (Читает ОС)
-  cpu_monitor:
-    build:
-      context: ./services/cpu_monitor
-    container_name: marits-cpu-monitor
-    depends_on:
-      - metrics_client_api
-    networks:
-      - metrics-net
-    environment:
-      METRICS_API_URL: http://metrics_client_api:8000
-      CPU_SCRAPE_INTERVAL: "5.0"
-      CPU_COMPRESSOR: "none"
+cpu_monitor:
+  build:
+    context: ./services/cpu_monitor
+  container_name: marits-cpu-monitor
+  depends_on:
+    - metrics_client_api
+  environment:
+    METRICS_API_URL: http://metrics_client_api:8000
+    CPU_SCRAPE_INTERVAL: "5"
+    CPU_COMPRESSOR: "none"
+  networks:
+    - metrics-net
+  restart: unless-stopped
+  # Healthcheck не требуется - агент не имеет сетевого интерфейса
 ```
 
-## Запуск
+**Важно:** Для доступа к метрикам хоста из контейнера может потребоваться дополнительный volume:
 
-Из корня проекта:
-
-```bash
-docker-compose up -d --build
+```yaml
+cpu_monitor:
+  volumes:
+    - /proc:/host/proc:ro
+    - /sys:/host/sys:ro
+  environment:
+    PROCFS_PATH: /host/proc
+    SYSFS_PATH: /host/sys
 ```
 
-## Проверка
+### Debug режим
+
+Запуск с пересборкой и просмотром логов:
 
 ```bash
-docker-compose ps
-docker-compose logs -f cpu_monitor
+# Пересборка и запуск
+docker compose up cpu_monitor --build
+
+# Просмотр логов в реальном времени
+docker compose logs -f cpu_monitor
+
+# Выполнение команд внутри контейнера
+docker compose exec cpu_monitor bash
 ```
 
 ---
 
-# Запуск на Linux без Docker
+## Запуск на хосте (без Docker)
 
-Этот сценарий подходит для локального запуска без прав администратора.
+### Установка
 
-## Вариант 1. Через скрипт установки и запуска
-
-Скрипт `install_and_run.sh` создаёт локальное виртуальное окружение, ставит зависимости и запускает агент.
-
-### Запуск
+#### Linux / macOS
 
 ```bash
-chmod +x install_and_run.sh
-./install_and_run.sh
+cd services/cpu_monitor
+
+# Создать виртуальное окружение
+python -m venv .venv
+source .venv/bin/activate
+
+# Установить зависимости
+pip install -e .
 ```
 
-## Вариант 2. Вручную
+#### Windows
 
-### Создать виртуальное окружение
+```bat
+cd services/cpu_monitor
+
+:: Создать виртуальное окружение
+python -m venv .venv
+.venv\Scripts\activate
+
+:: Установить зависимости
+pip install -e .
+```
+
+### Запуск в режиме разработки (Debug)
+
+#### Linux / macOS
 
 ```bash
-python3 -m venv .venv_cpu_monitor
+# Установка переменных окружения
+export METRICS_API_URL=http://localhost:8000
+export CPU_SCRAPE_INTERVAL=5
+export CPU_COMPRESSOR=none
+export LOG_LEVEL=DEBUG
+
+# Запуск агента с подробным логированием
+python -m cpu_monitor.main
 ```
 
-### Установить пакет
-
-```bash
-.venv_cpu_monitor/bin/python -m pip install --upgrade pip
-.venv_cpu_monitor/bin/python -m pip install .
-```
-
-### Запустить агент
-
-```bash
-export METRICS_API_URL="http://localhost:8000"
-export CPU_SCRAPE_INTERVAL="5"
-export CPU_COMPRESSOR="none"
-
-.venv_cpu_monitor/bin/python -m cpu_monitor.main
-```
-
-## Примечание
-
-Если на системе включена защита от установки в системный Python, не используй `pip install` без виртуального окружения. Всегда ставь пакет в локальный `venv`.
-
----
-
-# Запуск на Windows без Docker
-
-Этот сценарий подходит для локального запуска без прав администратора.
-
-## Вариант 1. Через `install_agent.bat`
-
-Скрипт создаёт локальное виртуальное окружение и ставит пакет туда.
-
-### Запуск
+#### Windows
 
 ```bat
-install_agent.bat
-```
-
-## Вариант 2. Через `install_agent.bat`
-
-Скрипт запускает уже установленный агент из локального `venv`.
-
-### Запуск
-
-```bat
-install_agent.bat
-```
-
-## Вручную
-
-### Создать виртуальное окружение
-
-```bat
-python -m venv .venv_cpu_monitor
-```
-
-### Установить пакет
-
-```bat
-.venv_cpu_monitor\Scripts\python.exe -m pip install --upgrade pip
-.venv_cpu_monitor\Scripts\python.exe -m pip install .
-```
-
-### Запустить агент
-
-```bat
+:: Установка переменных окружения
 set METRICS_API_URL=http://localhost:8000
 set CPU_SCRAPE_INTERVAL=5
 set CPU_COMPRESSOR=none
+set LOG_LEVEL=DEBUG
 
-.venv_cpu_monitor\Scripts\python.exe -m cpu_monitor.main
+:: Запуск агента
+python -m cpu_monitor.main
+```
+
+Или используйте готовые скрипты:
+
+```bat
+:: Установка и запуск одним скриптом
+install_and_run_agent.bat
+
+:: Или по отдельности
+install_agent.bat
+run_agent.bat
+```
+
+### Запуск в production режиме
+
+#### Linux (systemd)
+
+Создайте файл `/etc/systemd/system/cpu-monitor.service`:
+
+```ini
+[Unit]
+Description=CPU Monitor Agent
+After=network.target
+
+[Service]
+Type=simple
+User=monitor
+WorkingDirectory=/opt/cpu-monitor
+Environment="METRICS_API_URL=http://metrics_client_api:8000"
+Environment="CPU_SCRAPE_INTERVAL=5"
+Environment="CPU_COMPRESSOR=none"
+ExecStart=/opt/cpu-monitor/.venv/bin/python -m cpu_monitor.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Запуск:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable cpu-monitor
+sudo systemctl start cpu-monitor
+
+# Проверка статуса
+sudo systemctl status cpu-monitor
+
+# Просмотр логов
+journalctl -u cpu-monitor -f
+```
+
+#### Linux (supervisor)
+
+Создайте файл `/etc/supervisor/conf.d/cpu-monitor.conf`:
+
+```ini
+[program:cpu-monitor]
+directory=/opt/cpu-monitor
+command=.venv/bin/python -m cpu_monitor.main
+environment=METRICS_API_URL="http://metrics_client_api:8000",CPU_SCRAPE_INTERVAL="5"
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/cpu-monitor.err.log
+stdout_logfile=/var/log/cpu-monitor.out.log
+```
+
+Запуск:
+
+```bash
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl start cpu-monitor
+```
+
+#### Windows (как служба)
+
+Используйте NSSM (Non-Sucking Service Manager):
+
+```bat
+:: Скачать NSSM и установить службу
+nssm install cpu-monitor "C:\Python314\python.exe" "-m cpu_monitor.main"
+nssm set cpu-monitor AppDirectory "C:\cpu-monitor"
+nssm set cpu-monitor AppEnvironmentExtra METRICS_API_URL=http://localhost:8000
+nssm start cpu-monitor
+```
+
+#### Windows (Task Scheduler)
+
+Запуск при загрузке системы через планировщик задач:
+
+```bat
+schtasks /Create /TN "CPU Monitor" /TR "python -m cpu_monitor.main" /SC ONSTART /RU SYSTEM
 ```
 
 ---
 
-# Как это работает
+## Проверка работоспособности
 
-Агент:
+### Проверка логов
 
-1. ждёт указанный интервал;
-2. собирает CPU-метрики;
-3. при необходимости прогоняет их через компрессор;
-4. отправляет пакет метрик в `metrics_client_api`.
+```bash
+# В Docker
+docker compose logs cpu_monitor
 
-`metrics_client_api` уже сам преобразует запросы в обращения к серверу метрик.
+# На хосте (Linux systemd)
+journalctl -u cpu-monitor -f
+
+# На хосте (Windows)
+# Логи выводятся в консоль или в файлы, указанные в конфигурации
+```
+
+### Проверка отправки метрик
+
+1. Запустите агент
+2. Проверьте логи API:
+   ```bash
+   docker compose logs metrics_client_api
+   ```
+3. Проверьте наличие метрик в базе:
+   ```python
+   from metrics_client import Client
+   c = Client("localhost", 8888)
+   print(c.get("cpu.usage_percent"))
+   ```
 
 ---
 
-# Протокол отправки
+## Формат отправляемых данных
 
-Агент отправляет данные в API в формате пакета метрик.
-
-Пример одной записи:
+Агент отправляет метрики в формате JSON:
 
 ```json
 {
   "metric": "cpu.usage_percent",
   "value": 42.5,
-  "timestamp": 1711450000
+  "timestamp": 1711450000,
+  "tags": {
+    "host": "server01",
+    "core": "all"
+  }
 }
 ```
 
+Доступные метрики:
+
+- `cpu.usage_percent` — загрузка CPU в процентах
+- `cpu.count` — количество ядер
+- `memory.used_percent` — использование памяти
+- `disk.usage_percent` — использование диска
+
 ---
 
-# Полезные команды
+## Troubleshooting
 
-## Linux
+### Агент не отправляет метрики
+
+1. Проверьте доступность API:
+   ```bash
+   curl http://localhost:8000/health
+   ```
+
+2. Убедитесь, что переменная `METRICS_API_URL` корректна:
+   ```bash
+   echo $METRICS_API_URL  # Linux
+   echo %METRICS_API_URL%  # Windows
+   ```
+
+3. Проверьте логи агента на наличие ошибок
+
+### Ошибки доступа к системным метрикам
+
+**Docker:** Добавьте volumes для доступа к `/proc` и `/sys`:
+
+```yaml
+volumes:
+  - /proc:/host/proc:ro
+  - /sys:/host/sys:ro
+```
+
+**Linux:** Запустите от имени пользователя с правами чтения `/proc`:
 
 ```bash
-python3 -m venv .venv_cpu_monitor
-.venv_cpu_monitor/bin/python -m pip install .
-.venv_cpu_monitor/bin/python -m cpu_monitor.main
+sudo python -m cpu_monitor.main
 ```
 
-## Windows
+**Windows:** Запустите от имени администратора
 
-```bat
-python -m venv .venv_cpu_monitor
-.venv_cpu_monitor\Scripts\python.exe -m pip install .
-.venv_cpu_monitor\Scripts\python.exe -m cpu_monitor.main
-```
+### Высокая нагрузка от агента
 
-## Docker Compose
+Увеличьте интервал сбора:
 
 ```bash
-docker-compose up -d --build
-docker-compose logs -f cpu_monitor
+export CPU_SCRAPE_INTERVAL=30  # сбор каждые 30 секунд
 ```
 
 ---
 
-# Разработка
+## Разработка
 
-Если ты меняешь код агента, после правок:
+### Добавление новых метрик
 
-- в Docker — пересобери образ;
-- в Linux/Windows локально — переустанови пакет в virtual environment.
+1. Создайте функцию сбора в `src/cpu_monitor/collector.py`
+2. Добавьте отправку в `src/cpu_monitor/main.py`
+3. Обновите документацию
 
-Примеры:
+Пример:
+
+```python
+import psutil
+
+def get_memory_metrics():
+    memory = psutil.virtual_memory()
+    return {
+        "metric": "memory.used_percent",
+        "value": memory.percent,
+        "timestamp": int(time.time())
+    }
+```
+
+### Тестирование
 
 ```bash
-.venv_cpu_monitor/bin/python -m pip install .
-```
+# Запуск тестов (при наличии)
+pytest tests/
 
-```bat
-.venv_cpu_monitor\Scripts\python.exe -m pip install .
+# Линтинг
+flake8 src/cpu_monitor/
+
+# Проверка типов
+mypy src/cpu_monitor/
 ```
 
 ---
 
-# Дальнейшее развитие
+## Мониторинг самого агента
 
-Планируется добавить:
+Агент не предоставляет health check endpoint, но его работоспособность можно проверить:
 
-- расширение пула собираемых метрик;
-- кастомный компрессор временных рядов;
+```bash
+# Проверка процесса
+ps aux | grep cpu_monitor
+
+# Проверка логов на наличие последних записей
+docker compose logs --tail=10 cpu_monitor
+
+# Проверка отправки метрик через логи API
+docker compose logs metrics_client_api | grep "received metric"
+```
 
 ---
+
+## Планы развития
+
+- Поддержка дополнительных метрик (сеть, GPU, процессы)
+- Кастомные компрессоры временных рядов
+- Буферизация метрик при недоступности API
+- Динамическая настройка интервала через API
