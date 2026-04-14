@@ -79,19 +79,24 @@ services:
       CPU_SCRAPE_INTERVAL: "5.0"
       CPU_COMPRESSOR: "none"
 
-  # # 5. Marimo Тетрадка
-  # marimo_dashboard:
-  #   build:
-  #     context: ./services/marimo_dashboard
-  #   container_name: marits-marimo
-  #   volumes:
-  #     - ./services/marimo_dashboard/notebooks:/app/notebooks
-  #   ports:
-  #     - "8080:8080"
-  #   networks:
-  #     - metrics-net
+  # 5. Marimo Тетрадка
+  marimo_dashboard:
+    build:
+      context: ./services/marimo_dashboard
+    container_name: marits-marimo
+    volumes:
+      - ./services/marimo_dashboard/notebooks:/app/notebooks
+    ports:
+      - "8080:8080"
+    networks:
+      - metrics-net
+    environment:
+      METRICS_CLIENT_API_HOST: metrics_client_api
+      METRICS_CLIENT_API_PORT: "8000"
+    depends_on:
+      - metrics_client_api
 
-  # # 6. JS-Фронтенд
+  # 6. JS-Фронтенд
   web_dashboard:
     restart: unless-stopped
     build:

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marimo-dashboard"
+version = "0.1.0"
+description = "Marimo dashboard for metrics visualization"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+authors = [
+  { name = "Lex Huan", email = "BrightComes@mail.ru" }
+]
+
+dependencies = [
+  "marimo>=0.8.0",
+  "requests>=2.31.0",
+  "pandas",
+  "numpy",
+  "plotly",
+]

@@ -9,11 +9,10 @@ RUN apk add --no-cache \
 WORKDIR /app
 
 COPY pyproject.toml ./
-COPY src ./src
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel build
 
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel build && \
-    python -m build && \
-    pip install --no-cache-dir --prefix=/install ./dist/*.whl 
+COPY src ./src
+RUN pip install --no-cache-dir --prefix=/install .
 
 # --- ЭТАП 2: Финальный образ ---
 FROM python:3.14-alpine
@@ -26,11 +25,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/usr/local/bin:$PATH" 
 
+RUN apk add --no-cache netcat-openbsd
+
 WORKDIR /app
 
 COPY --from=builder /install /usr/local
 COPY src/web_dashboard/server.py ./server.py       
 COPY src/web_dashboard/static ./static         
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+RUN chown -R appuser:appgroup /app
+
+USER appuser
 
 EXPOSE 4000
 
