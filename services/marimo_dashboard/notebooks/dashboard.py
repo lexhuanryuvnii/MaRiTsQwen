@@ -1,19 +1,15 @@
 import marimo
 
-__generated_with = "0.8.0"
+__generated_with = "0.14.0"
 app = marimo.App()
 
 
 @app.cell
-def _(marimo, os):
+def _():
     """
     Конфигурация подключения к API
     """
-    # Адрес API сервиса метрик
-    API_HOST = os.getenv("METRICS_CLIENT_API_HOST", "metrics_client_api")
-    API_PORT = int(os.getenv("METRICS_CLIENT_API_PORT", "8000"))
-    API_BASE_URL = f"http://{API_HOST}:{API_PORT}"
-    
+    import os
     import requests
     import pandas as pd
     import numpy as np
@@ -22,7 +18,12 @@ def _(marimo, os):
     from datetime import datetime
     import time
     
-    return
+    # Адрес API сервиса метрик
+    API_HOST = os.getenv("METRICS_CLIENT_API_HOST", "metrics_client_api")
+    API_PORT = int(os.getenv("METRICS_CLIENT_API_PORT", "8000"))
+    API_BASE_URL = f"http://{API_HOST}:{API_PORT}"
+    
+    return API_HOST, API_PORT, API_BASE_URL, requests, pd, np, go, make_subplots, datetime, time, os
 
 
 @app.cell
@@ -157,7 +158,7 @@ def _(refresh_btn, fetch_metrics_data, metrics_selector, time_window):
 
 
 @app.cell
-def _(series_data, stats_data, go, make_subplots, pd, np):
+def _(series_data, stats_data, go, make_subplots, pd, np, marimo):
     """
     Построение графиков на двух панелях
     """
@@ -260,6 +261,7 @@ def _(series_data, stats_data, go, make_subplots, pd, np):
                     stats_df = pd.DataFrame(stats_rows)
                     marimo.md("### Статистика метрик")
                     stats_df
+    return
 
 
 @app.cell

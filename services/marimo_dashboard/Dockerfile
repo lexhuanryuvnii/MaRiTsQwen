@@ -1,4 +1,4 @@
-# --- ЭТАП 1: Сборка (Builder) ---
+# --- ЭТАП 1: Сборка зависимостей (Builder) ---
 FROM python:3.12-alpine as builder
 
 RUN apk add --no-cache \
@@ -8,9 +8,21 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
+# Сначала устанавливаем зависимости (кешируется при изменении кода)
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel build
-RUN pip install --no-cache-dir --prefix=/install .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel build && \
+    pip install --no-cache-dir --prefix=/install \
+        pandas \
+        numpy \
+        marimo \
+        packaging \
+        starlette \
+        uvicorn \
+        requests \
+        plotly
+
+# Копируем ноутбуки после установки зависимостей
+COPY notebooks/ ./notebooks
 
 # --- ЭТАП 2: Финальный образ ---
 FROM python:3.12-alpine
@@ -27,8 +39,11 @@ RUN apk add --no-cache libstdc++ curl netcat-openbsd
 
 WORKDIR /app
 
+# Копируем зависимости из билдера
 COPY --from=builder /install /usr/local
-COPY notebooks ./notebooks
+
+# Копируем ноутбуки
+COPY notebooks/ ./notebooks
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 RUN chown -R appuser:appgroup /app
