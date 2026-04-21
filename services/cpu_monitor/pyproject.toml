@@ -16,7 +16,8 @@ authors = [
 
 dependencies = [
   "psutil>=5.0",
-  "requests>=2.0"
+  "requests>=2.0",
+  "sausage-links>=1.0.0"
 ]
 
 # Указываем setuptools, что код лежит в папке src

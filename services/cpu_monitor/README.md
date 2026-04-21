@@ -33,6 +33,7 @@ cpu_monitor/
 - Python 3.11+
 - psutil>=5.0
 - requests>=2.0
+- sausage-links>=1.0.0 (алгоритм сжатия временных рядов)
 
 ## Конфигурация
 
@@ -42,10 +43,51 @@ cpu_monitor/
 |------------|----------|--------|--------------|
 | `METRICS_API_URL` | Адрес FastAPI-клиента | `http://localhost:8000` | `http://localhost:8000` |
 | `CPU_SCRAPE_INTERVAL` | Интервал сбора метрик (сек) | `5` | `5` |
-| `CPU_COMPRESSOR` | Алгоритм сжатия | `none` | `none` |
+| `CPU_COMPRESSOR` | Алгоритм сжатия | `none`, `sausage_links` | `none` |
+| `COMPRESSOR_DEVIATION` | Отклонение для компрессора Sausage Links | `0.5` | `0.5` |
+| `COMPRESSOR_AUTO_DEV_FACTOR` | Множитель для авто-отклонения | `0.5` | `0.5` |
+| `COMPRESSOR_EMA_ALPHA` | Коэффициент сглаживания EMA | `0.3` | `0.3` |
+| `SEND_THRESHOLD` | Порог количества точек для отправки | `1` | `1` |
 | `LOG_LEVEL` | Уровень логирования | `INFO` | `INFO` |
 
 ---
+
+## Архитектура потоковой обработки метрик
+
+Агент использует архитектуру **независимых потоков метрик** (Metric Streams):
+
+### Ключевые особенности:
+
+1. **Независимая отправка по метрикам**: Каждая метрика (`cpu.usage_percent`, `cpu.freq.current_mhz`, `memory.percent_usage` и т.д.) отправляется на сервер отдельным HTTP-запросом сразу после накопления достаточного количества точек.
+
+2. **Потоковое сжатие Sausage Links**: На каждой метрике "висит" свой экземпляр компрессора, который применяет алгоритм [Sausage Links](https://github.com/chelaxe/SausageLinks) для сжатия временных рядов.
+
+3. **Регулировка частоты отправки**: Параметр `SEND_THRESHOLD` контролирует, сколько сжатых точек нужно накопить перед отправкой. Это позволяет регулировать частоту HTTP-запросов.
+
+4. **Адаптивное сжатие**: При использовании `auto_dev_factor > 0` компрессор автоматически подстраивает чувствительность к изменениям данных через EMA (Exponential Moving Average).
+
+### Структура потока обработки:
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Collector     │────▶│  MetricStream    │────▶│     Sender      │
+│  (сбор метрик)  │     │ (компрессор +    │     │ (HTTP запрос)   │
+│                 │     │   буферизация)   │     │                 │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+                               │
+                        ┌──────▼──────┐
+                        │ Sausage     │
+                        │ Links       │
+                        │ Compressor  │
+                        └─────────────┘
+```
+
+### Преимущества:
+
+- **Масштабируемость**: Новые метрики добавляются динамически без изменения кода
+- **Эффективность**: Сжатие уменьшает объём передаваемых данных в 2-10 раз
+- **Гибкость**: Каждая метрика может иметь свои параметры сжатия
+- **Надёжность**: Ошибка отправки одной метрики не влияет на другие
 
 ## Запуск в Docker Compose
 
@@ -143,7 +185,11 @@ pip install -e .
 # Установка переменных окружения
 export METRICS_API_URL=http://localhost:8000
 export CPU_SCRAPE_INTERVAL=5
-export CPU_COMPRESSOR=none
+export CPU_COMPRESSOR=sausage_links
+export COMPRESSOR_DEVIATION=0.5
+export COMPRESSOR_AUTO_DEV_FACTOR=0.5
+export COMPRESSOR_EMA_ALPHA=0.3
+export SEND_THRESHOLD=1
 export LOG_LEVEL=DEBUG
 
 # Запуск агента с подробным логированием
@@ -156,7 +202,11 @@ python -m cpu_monitor.main
 :: Установка переменных окружения
 set METRICS_API_URL=http://localhost:8000
 set CPU_SCRAPE_INTERVAL=5
-set CPU_COMPRESSOR=none
+set CPU_COMPRESSOR=sausage_links
+set COMPRESSOR_DEVIATION=0.5
+set COMPRESSOR_AUTO_DEV_FACTOR=0.5
+set COMPRESSOR_EMA_ALPHA=0.3
+set SEND_THRESHOLD=1
 set LOG_LEVEL=DEBUG
 
 :: Запуск агента
