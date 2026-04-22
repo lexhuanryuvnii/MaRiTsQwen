@@ -1,0 +1,2 @@
+[console_scripts]
+cpu-monitor = cpu_monitor.main:main

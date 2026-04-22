@@ -1,3 +1,15 @@
+Metadata-Version: 2.4
+Name: cpu-monitor
+Version: 0.1.0
+Summary: CPU metrics collector with optional compression
+Author-email: Lex Huan <BrightComes@mail.ru>
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: psutil>=5.0
+Requires-Dist: requests>=2.0
+Requires-Dist: sausage-links>=1.0.0
+
 # CPU Monitor
 
 Агент для сбора метрик CPU и отправки их в `metrics_client_api`.
