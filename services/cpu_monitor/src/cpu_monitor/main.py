@@ -1,11 +1,13 @@
-"""Реализация агента сбора и отправки метрик с независимой отправкой по метрикам."""
+"""Реализация агента сбора и отправки метрик с пакетной отправкой и потоковым сжатием."""
 
 import os
 import time
+import threading
 from typing import Literal, Dict, List, Tuple, Optional
 
 from cpu_monitor.collector import collect_cpu_metrics
 from cpu_monitor.compressor import StreamingCompressor, CompressorName
+from cpu_monitor.sender import send_points_batch
 
 
 MetricPoints = Dict[str, List[Tuple[int, float]]]
@@ -13,8 +15,8 @@ MetricPoints = Dict[str, List[Tuple[int, float]]]
 
 class MetricStream:
     """
-    Управляет потоком одной метрики: буферизация, сжатие и отправка.
-    Каждая метрика имеет свой собственный компрессор и может регулировать частоту отправки.
+    Управляет потоком одной метрики: буферизация, сжатие.
+    Каждая метрика имеет свой собственный компрессор.
     """
     
     def __init__(
@@ -24,11 +26,9 @@ class MetricStream:
         deviation: float = 0.5,
         auto_dev_factor: float = 0.5,
         ema_alpha: float = 0.3,
-        send_threshold: int = 1,  # Количество точек для триггера отправки
     ):
         self.metric_name = metric_name
         self.compressor_name = compressor_name
-        self.send_threshold = send_threshold
         
         self._compressor = StreamingCompressor(
             compressor_name=compressor_name,
@@ -36,168 +36,187 @@ class MetricStream:
             auto_dev_factor=auto_dev_factor,
             ema_alpha=ema_alpha,
         )
-        self._pending_points: List[Tuple[int, float]] = []
+        # Буфер сжатых точек, готовых к отправке
+        self._compressed_buffer: List[Tuple[int, float]] = []
+        self._lock = threading.Lock()
     
-    def add_points(self, points: List[Tuple[int, float]]) -> List[Tuple[int, float]]:
+    def add_points(self, points: List[Tuple[int, float]]) -> None:
         """
         Добавляет новые точки в поток метрики.
-        Возвращает сжатые точки, готовые к отправке.
+        Сжатые точки помещаются в буфер для последующей отправки.
         """
-        # Пропускаем через компрессор
-        compressed = self._compressor.add_points(points)
-        
-        # Буферизуем сжатые точки
-        self._pending_points.extend(compressed)
-        
-        # Проверяем, пора ли отправлять
-        ready_to_send = []
-        if len(self._pending_points) >= self.send_threshold:
-            ready_to_send = self._pending_points[:]
-            self._pending_points = []
-        
-        return ready_to_send
+        with self._lock:
+            # Пропускаем через компрессор
+            compressed = self._compressor.add_points(points)
+            # Буферизуем сжатые точки
+            self._compressed_buffer.extend(compressed)
     
-    def flush(self) -> List[Tuple[int, float]]:
-        """Сбрасывает все накопленные точки для отправки."""
-        flushed = self._pending_points[:]
-        self._pending_points = []
-        return flushed
+    def flush_to_send(self) -> List[Tuple[int, float]]:
+        """Забирает все накопленные сжатые точки для отправки."""
+        with self._lock:
+            if not self._compressed_buffer:
+                return []
+            ready = self._compressed_buffer[:]
+            self._compressed_buffer = []
+            return ready
+    
+    def final_flush(self) -> List[Tuple[int, float]]:
+        """Сбрасывает все точки включая незавершённые перед остановкой."""
+        with self._lock:
+            # Забираем буфер
+            result = self._compressed_buffer[:]
+            self._compressed_buffer = []
+            # Добавляем оставшиеся точки из компрессора
+            remaining = self._compressor.flush()
+            result.extend(remaining)
+            return result
 
 
 def run_agent(
     api_url: str,
-    interval: float,
+    collection_interval: float,
+    batch_send_interval: float,
     compressor_name: CompressorName = "none",
     deviation: float = 0.5,
     auto_dev_factor: float = 0.5,
     ema_alpha: float = 0.3,
-    send_threshold: int = 1,
 ) -> None:
     print(
-        f"Starting CPU monitor with independent metric streams: "
-        f"api_url={api_url}, interval={interval}s, "
+        f"Starting CPU monitor with batch sending and streaming compression: "
+        f"api_url={api_url}, collection_interval={collection_interval}s, "
+        f"batch_send_interval={batch_send_interval}s, "
         f"compressor={compressor_name}, deviation={deviation}, "
         f"auto_dev_factor={auto_dev_factor}, ema_alpha={ema_alpha}"
     )
     
     # Словарь потоков для каждой метрики
     metric_streams: Dict[str, MetricStream] = {}
+    streams_lock = threading.Lock()
     
-    while True:
-        try:
-            time.sleep(interval)
-            
-            # Собираем сырые метрики
-            raw_points = collect_cpu_metrics(interval=1.0)
-            print(f"Collected raw metrics for {len(raw_points)} metrics")
-            
-            # Обрабатываем каждую метрику независимо
-            for metric_name, points in raw_points.items():
-                # Создаём поток для новой метрики при первом появлении
-                if metric_name not in metric_streams:
-                    metric_streams[metric_name] = MetricStream(
-                        metric_name=metric_name,
-                        compressor_name=compressor_name,
-                        deviation=deviation,
-                        auto_dev_factor=auto_dev_factor,
-                        ema_alpha=ema_alpha,
-                        send_threshold=send_threshold,
-                    )
-                    print(f"Created stream for metric: {metric_name}")
+    # Флаг остановки
+    stop_event = threading.Event()
+    
+    def collect_loop():
+        """Цикл сбора данных каждые collection_interval секунд."""
+        while not stop_event.is_set():
+            try:
+                # Собираем сырые метрики (collector сам ждёт interval)
+                raw_points = collect_cpu_metrics(interval=collection_interval)
+                print(f"Collected raw metrics for {len(raw_points)} metrics")
                 
-                # Получаем сжатые точки для отправки
-                stream = metric_streams[metric_name]
-                ready_points = stream.add_points(points)
+                # Обрабатываем каждую метрику независимо
+                with streams_lock:
+                    for metric_name, points in raw_points.items():
+                        # Создаём поток для новой метрики при первом появлении
+                        if metric_name not in metric_streams:
+                            metric_streams[metric_name] = MetricStream(
+                                metric_name=metric_name,
+                                compressor_name=compressor_name,
+                                deviation=deviation,
+                                auto_dev_factor=auto_dev_factor,
+                                ema_alpha=ema_alpha,
+                            )
+                            print(f"Created stream for metric: {metric_name}")
+                        
+                        # Добавляем точки в поток (сжатие происходит внутри)
+                        stream = metric_streams[metric_name]
+                        stream.add_points(points)
                 
-                if ready_points:
-                    # Отправляем только эту метрику
-                    _send_metric_batch(
-                        metric_name=metric_name,
-                        points=ready_points,
-                        api_url=api_url,
-                    )
+            except Exception as exc:
+                print(f"Collection error: {exc}, continuing...")
+    
+    def send_loop():
+        """Цикл отправки пакетов каждые batch_send_interval секунд."""
+        while not stop_event.is_set():
+            try:
+                time.sleep(batch_send_interval)
+                
+                # Собираем все готовые к отправке точки из всех потоков
+                batch_to_send: MetricPoints = {}
+                
+                with streams_lock:
+                    for metric_name, stream in metric_streams.items():
+                        ready_points = stream.flush_to_send()
+                        if ready_points:
+                            batch_to_send[metric_name] = ready_points
+                        if metric_name == "cpu.freq.current_mhz":
+                            print(f"CPU freq mhz to send: {ready_points}")
+                
+                # Отправляем пакет если есть данные
+                if batch_to_send:
+                    total_points = sum(len(pts) for pts in batch_to_send.values())
+                    send_points_batch(batch_to_send, api_url)
                     print(
-                        f"Sent {len(ready_points)} points for {metric_name}: "
-                        f"{ready_points[:3]}..." if len(ready_points) > 3 
-                        else f"Sent {len(ready_points)} points for {metric_name}: {ready_points}"
+                        f"Sent batch with {total_points} points across "
+                        f"{len(batch_to_send)} metrics"
                     )
-            
-            # Логируем количество активных потоков
-            print(f"Active metric streams: {list(metric_streams.keys())}")
-            
-        except KeyboardInterrupt:
-            print("Shutting down agent...")
-            # Сбрасываем оставшиеся точки перед выходом
+                else:
+                    print("No compressed points to send in this batch")
+                
+            except Exception as exc:
+                print(f"Send error: {exc}, continuing...")
+    
+    # Запускаем потоки
+    collector_thread = threading.Thread(target=collect_loop, daemon=True)
+    sender_thread = threading.Thread(target=send_loop, daemon=True)
+    
+    collector_thread.start()
+    sender_thread.start()
+    
+    # Ждём прерывания
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down agent...")
+        stop_event.set()
+        
+        # Даём потокам немного времени на завершение
+        collector_thread.join(timeout=2.0)
+        sender_thread.join(timeout=2.0)
+        
+        # Финальная отправка всех оставшихся точек
+        print("Flushing remaining points...")
+        final_batch: MetricPoints = {}
+        with streams_lock:
             for metric_name, stream in metric_streams.items():
-                remaining = stream.flush()
+                remaining = stream.final_flush()
                 if remaining:
-                    _send_metric_batch(
-                        metric_name=metric_name,
-                        points=remaining,
-                        api_url=api_url,
-                    )
+                    final_batch[metric_name] = remaining
                     print(f"Flushed {len(remaining)} points for {metric_name}")
-            break
-        except Exception as exc:
-            print(f"Agent error: {exc}, continuing...")
-
-
-def _send_metric_batch(
-    metric_name: str,
-    points: List[Tuple[int, float]],
-    api_url: str,
-) -> None:
-    """
-    Отправляет пакет точек для ОДНОЙ метрики в /metrics/put_batch.
-    
-    Формат JSON:
-      [
-        {"metric": "cpu.usage_percent", "value": 42.5, "timestamp": 1711450000},
-        ...
-      ]
-    """
-    import requests
-    
-    endpoint = api_url.rstrip("/") + "/metrics/put_batch"
-    
-    payload = [
-        {
-            "metric": metric_name,
-            "value": value,
-            "timestamp": ts,
-        }
-        for ts, value in points
-    ]
-    
-    if not payload:
-        return
-    
-    resp = requests.post(endpoint, json=payload, timeout=5.0)
-    if not resp.ok:
-        raise RuntimeError(
-            f"Failed to send metrics batch for {metric_name}: {resp.status_code} {resp.text}"
-        )
+        
+        if final_batch:
+            try:
+                send_points_batch(final_batch, api_url)
+                print("Final batch sent successfully")
+            except Exception as exc:
+                print(f"Failed to send final batch: {exc}")
+        
+        print("Agent stopped")
 
 
 def main() -> None:
     """CLI‑обёртка, читающая env‑переменные и запускающая run_agent()."""
     
     api_url = os.getenv("METRICS_API_URL", "http://localhost:8000")
-    interval = float(os.getenv("CPU_SCRAPE_INTERVAL", "5.0"))
+    collection_interval = float(os.getenv("CPU_COLLECTION_INTERVAL", "0.5"))
+    batch_send_interval = float(os.getenv("BATCH_SEND_INTERVAL", "3.0"))
     compressor_name: CompressorName = os.getenv("CPU_COMPRESSOR", "none")  # type: ignore
-    deviation = float(os.getenv("COMPRESSOR_DEVIATION", "0.5"))
+    # deviation=1.0 подходит для метрик с небольшим изменением
+    # Для частоты CPU (~2000-4000 MHz) используем меньшее значение
+    # auto_dev_factor=0.5 включает адаптивное отклонение
+    deviation = float(os.getenv("COMPRESSOR_DEVIATION", "1.0"))
     auto_dev_factor = float(os.getenv("COMPRESSOR_AUTO_DEV_FACTOR", "0.5"))
     ema_alpha = float(os.getenv("COMPRESSOR_EMA_ALPHA", "0.3"))
-    send_threshold = int(os.getenv("SEND_THRESHOLD", "1"))
     
     run_agent(
         api_url=api_url,
-        interval=interval,
+        collection_interval=collection_interval,
+        batch_send_interval=batch_send_interval,
         compressor_name=compressor_name,
         deviation=deviation,
         auto_dev_factor=auto_dev_factor,
         ema_alpha=ema_alpha,
-        send_threshold=send_threshold,
     )
 
 

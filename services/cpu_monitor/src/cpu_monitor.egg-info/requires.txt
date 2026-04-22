@@ -1,0 +1,3 @@
+psutil>=5.0
+requests>=2.0
+sausage-links>=1.0.0
