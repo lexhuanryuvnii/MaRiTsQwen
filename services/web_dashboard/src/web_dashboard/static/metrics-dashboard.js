@@ -16,6 +16,9 @@ class MetricsDashboard extends HTMLElement {
         // Палитра для графиков
         this.colors = ['#38bdf8', '#22c55e', '#f97316', '#a855f7', '#ef4444', '#eab308'];
         
+        // Хранилище всех точек для каждой метрики (для накопления данных)
+        this.metricsDataStore = new Map();
+        
         // Словарь локализации и конфигурации метрик
         this.metricConfig = {
             'cpu.core0_usage_percent': {
@@ -198,7 +201,18 @@ class MetricsDashboard extends HTMLElement {
         const now = Date.now();
         const cutoff = now - (this.getAttribute('minutes') || 30) * 60 * 1000;
 
+        // Очищаем старые точки в хранилище для всех метрик
+        for (const [name, data] of this.metricsDataStore.entries()) {
+            while (data.length > 0 && data[0].x < cutoff) {
+                data.shift();
+            }
+        }
+
+        // Обновляем графики с новыми границами и отфильтрованными данными
         for (const chart of this.charts.values()) {
+            const metricName = chart.data.datasets[0].label;
+            const existingData = this.metricsDataStore.get(metricName) || [];
+            chart.data.datasets[0].data = existingData;
             chart.options.scales.x.min = cutoff;
             chart.options.scales.x.max = now;
             chart.update('none');
@@ -248,6 +262,9 @@ class MetricsDashboard extends HTMLElement {
 
             this.allAvailableMetrics = data.metrics;
             this.allAvailableMetrics.slice(0, 3).forEach(m => this.selectedMetrics.add(m));
+            
+            // Очищаем хранилище данных при инициализации
+            this.metricsDataStore.clear();
             
             this.renderMetricToggles();
             this.rebuildCharts();
@@ -301,6 +318,8 @@ class MetricsDashboard extends HTMLElement {
             if (!this.selectedMetrics.has(name)) {
                 chart.destroy();
                 this.charts.delete(name);
+                // Очищаем данные из хранилища для удаленной метрики
+                this.metricsDataStore.delete(name);
                 container.querySelector(`[data-wrapper="${name}"]`)?.remove();
             }
         }
@@ -326,6 +345,12 @@ class MetricsDashboard extends HTMLElement {
                 container.appendChild(wrapper);
                 const ctx = wrapper.querySelector('canvas').getContext('2d');
                 this.charts.set(metric, this.createChart(ctx, metric, color, info));
+            } else {
+                // Если график уже существует, обновляем его данные из хранилища
+                const existingData = this.metricsDataStore.get(metric) || [];
+                const chart = this.charts.get(metric);
+                chart.data.datasets[0].data = existingData;
+                chart.update('none');
             }
         });
     }
@@ -576,11 +601,37 @@ class MetricsDashboard extends HTMLElement {
         const minutes = this.getAttribute('minutes') || 30;
         const cutoff = now - minutes * 60 * 1000;
 
+        // Обновляем хранилище данных и обновляем графики накопленными данными
         for (const [name, points] of Object.entries(metricsData)) {
             const chart = this.charts.get(name);
             if (!chart) continue;
 
-            chart.data.datasets[0].data = points.map(p => ({ x: p.timestamp * 1000, y: p.value }));
+            // Добавляем новые точки в хранилище (объединяем по timestamp)
+            if (!this.metricsDataStore.has(name)) {
+                this.metricsDataStore.set(name, []);
+            }
+            
+            const existingData = this.metricsDataStore.get(name);
+            const existingTimestamps = new Set(existingData.map(p => p.x));
+            
+            // Добавляем только новые точки
+            for (const point of points) {
+                const x = point.timestamp * 1000;
+                if (!existingTimestamps.has(x)) {
+                    existingData.push({ x, y: point.value });
+                }
+            }
+            
+            // Сортируем по времени
+            existingData.sort((a, b) => a.x - b.x);
+            
+            // Удаляем старые точки за пределами окна
+            while (existingData.length > 0 && existingData[0].x < cutoff) {
+                existingData.shift();
+            }
+            
+            // Обновляем график
+            chart.data.datasets[0].data = existingData;
             chart.options.scales.x.min = cutoff;
             chart.options.scales.x.max = now;
             chart.update('none');

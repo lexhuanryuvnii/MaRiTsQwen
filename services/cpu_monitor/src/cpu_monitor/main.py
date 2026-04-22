@@ -26,6 +26,7 @@ class MetricStream:
         deviation: float = 0.5,
         auto_dev_factor: float = 0.5,
         ema_alpha: float = 0.3,
+        max_silent_interval: float = 10.0,
     ):
         self.metric_name = metric_name
         self.compressor_name = compressor_name
@@ -35,6 +36,7 @@ class MetricStream:
             deviation=deviation,
             auto_dev_factor=auto_dev_factor,
             ema_alpha=ema_alpha,
+            max_silent_interval=max_silent_interval,
         )
         # Буфер сжатых точек, готовых к отправке
         self._compressed_buffer: List[Tuple[int, float]] = []
@@ -46,7 +48,7 @@ class MetricStream:
         Сжатые точки помещаются в буфер для последующей отправки.
         """
         with self._lock:
-            # Пропускаем через компрессор
+            # Пропускаем через компрессор (heartbeat проверяется внутри)
             compressed = self._compressor.add_points(points)
             # Буферизуем сжатые точки
             self._compressed_buffer.extend(compressed)
@@ -80,13 +82,15 @@ def run_agent(
     deviation: float = 0.5,
     auto_dev_factor: float = 0.5,
     ema_alpha: float = 0.3,
+    max_silent_interval: float = 10.0,
 ) -> None:
     print(
         f"Starting CPU monitor with batch sending and streaming compression: "
         f"api_url={api_url}, collection_interval={collection_interval}s, "
         f"batch_send_interval={batch_send_interval}s, "
         f"compressor={compressor_name}, deviation={deviation}, "
-        f"auto_dev_factor={auto_dev_factor}, ema_alpha={ema_alpha}"
+        f"auto_dev_factor={auto_dev_factor}, ema_alpha={ema_alpha}, "
+        f"max_silent_interval={max_silent_interval}s"
     )
     
     # Словарь потоков для каждой метрики
@@ -115,6 +119,7 @@ def run_agent(
                                 deviation=deviation,
                                 auto_dev_factor=auto_dev_factor,
                                 ema_alpha=ema_alpha,
+                                max_silent_interval=max_silent_interval,
                             )
                             print(f"Created stream for metric: {metric_name}")
                         
@@ -208,6 +213,9 @@ def main() -> None:
     deviation = float(os.getenv("COMPRESSOR_DEVIATION", "1.0"))
     auto_dev_factor = float(os.getenv("COMPRESSOR_AUTO_DEV_FACTOR", "0.5"))
     ema_alpha = float(os.getenv("COMPRESSOR_EMA_ALPHA", "0.3"))
+    # max_silent_interval - интервал в секундах, через который отправляется heartbeat
+    # для неизменных метрик (чтобы отличить их от отсутствующих)
+    max_silent_interval = float(os.getenv("COMPRESSOR_MAX_SILENT_INTERVAL", "10.0"))
     
     run_agent(
         api_url=api_url,
@@ -217,6 +225,7 @@ def main() -> None:
         deviation=deviation,
         auto_dev_factor=auto_dev_factor,
         ema_alpha=ema_alpha,
+        max_silent_interval=max_silent_interval,
     )
 
 

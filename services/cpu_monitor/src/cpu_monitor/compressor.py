@@ -38,6 +38,10 @@ class StreamingCompressor:
     Алгоритм отправляет только первую точку и точки, где произошло значимое
     отклонение. Последняя точка ("открытый сегмент") не отправляется до тех
     пор, пока не появится новое значимое отклонение или не будет вызван flush().
+    
+    Для решения проблемы отличия "отсутствия отслеживания" от "неизменности метрики"
+    реализован механизм heartbeat: если метрика не отправлялась дольше max_silent_interval,
+    последняя точка отправляется принудительно как keepalive-сигнал.
     """
     
     def __init__(
@@ -46,18 +50,24 @@ class StreamingCompressor:
         deviation: float = 0.5,
         auto_dev_factor: float = 0.5,
         ema_alpha: float = 0.3,
+        max_silent_interval: float = 10.0,  # Максимальный интервал молчания в секундах
     ):
         self.compressor_name = compressor_name
         self.deviation = deviation
         self.auto_dev_factor = auto_dev_factor
         self.ema_alpha = ema_alpha
+        self.max_silent_interval = max_silent_interval
         
         # Буфер всех сырых точек для этой метрики
         self._all_points: List[Tuple[int, float]] = []
         # Множество timestamp'ов уже отправленных точек
         self._sent_timestamps: set = set()
+        # Timestamp последней отправленной точки (для heartbeat)
+        self._last_sent_timestamp: int = 0
+        # Последнее отправленное значение (для heartbeat)
+        self._last_sent_value: Optional[float] = None
     
-    def add_points(self, points: List[Tuple[int, float]]) -> List[Tuple[int, float]]:
+    def add_points(self, points: List[Tuple[int, float]], current_time: Optional[int] = None) -> List[Tuple[int, float]]:
         """
         Добавляет новые точки в буфер и возвращает сжатые точки для отправки.
         
@@ -66,6 +76,17 @@ class StreamingCompressor:
         
         Для постоянных метрик это означает, что будет отправлена только первая точка,
         а затем ничего, пока значение не изменится значительно.
+        
+        Реализует механизм heartbeat: если прошло больше max_silent_interval секунд
+        с последней отправки, последняя известная точка отправляется повторно как
+        keepalive-сигнал (чтобы отличить "метрика неизменна" от "метрика не отслеживается").
+        
+        Parameters:
+        points: Список новых точек (timestamp, value)
+        current_time: Текущий timestamp для проверки heartbeat (по умолчанию берется из последней точки)
+        
+        Returns:
+        Список точек для отправки (может включать heartbeat-точку)
         """
         if self.compressor_name == "none":
             return points
@@ -88,6 +109,35 @@ class StreamingCompressor:
             if ts not in self._sent_timestamps:
                 new_points_to_send.append((ts, val))
                 self._sent_timestamps.add(ts)
+                # Обновляем информацию о последней отправке
+                self._last_sent_timestamp = ts
+                self._last_sent_value = val
+        
+        # Если есть новые точки для отправки, обновляем last_sent для последней из них
+        if new_points_to_send:
+            last_ts, last_val = new_points_to_send[-1]
+            self._last_sent_timestamp = last_ts
+            self._last_sent_value = last_val
+        
+        # Проверка heartbeat: если давно не отправляли и есть последнее значение
+        if (self._last_sent_value is not None and 
+            self._all_points and 
+            current_time is None):
+            # Берем текущее время из последней сырой точки
+            current_time = self._all_points[-1][0]
+        
+        if (self._last_sent_value is not None and 
+            current_time is not None and
+            self.max_silent_interval > 0):
+            time_since_last_send = current_time - self._last_sent_timestamp
+            if time_since_last_send >= self.max_silent_interval:
+                # Отправляем heartbeat - последнюю известную точку с текущим timestamp
+                heartbeat_point = (current_time, self._last_sent_value)
+                # Не добавляем в _sent_timestamps, так как это повторяющееся значение
+                # Но обновляем timestamp последней отправки
+                self._last_sent_timestamp = current_time
+                new_points_to_send.append(heartbeat_point)
+                print(f"[COMPRESSOR] Heartbeat sent: {heartbeat_point}")
         
         # DEBUG: Print for frequency metric
         print(f"[COMPRESSOR] Iteration: raw_added={len(points)}, total_raw={len(self._all_points)}")
